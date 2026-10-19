@@ -5,7 +5,7 @@ on:
     branches: [main]
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -19,12 +19,93 @@ jobs:
         run: |
           mkdir -p www
           cp "$(ls *.html | head -n1)" www/index.html
+          python3 - <<'PY'
+          p = 'www/index.html'
+          s = open(p, encoding='utf-8').read()
+          inj = """<script>
+          (function(){
+            var orig = window.print.bind(window);
+            window.print = function(){
+              var C = window.Capacitor, P = null;
+              try {
+                if (C && C.isNativePlatform && C.isNativePlatform()) {
+                  P = (C.Plugins && C.Plugins.AppPrint) || C.registerPlugin('AppPrint');
+                }
+              } catch (e) {}
+              if (!P) { orig(); return; }
+              try { if (typeof applyPrintScale === 'function') applyPrintScale(); } catch (e) {}
+              setTimeout(function(){
+                P.print().catch(function(e){ alert('Print error: ' + ((e && e.message) || e)); });
+              }, 250);
+            };
+          })();
+          </script>"""
+          i = s.rfind('</body>')
+          s = s[:i] + inj + s[i:] if i != -1 else s + inj
+          open(p, 'w', encoding='utf-8').write(s)
+          PY
       - name: Create Android project
         run: |
           npm init -y
           npm install @capacitor/core @capacitor/cli @capacitor/android
           npx cap init "Mehta Voucher" com.mehta.voucher --web-dir=www
           npx cap add android
+      - name: Add print support
+        run: |
+          D=android/app/src/main/java/com/mehta/voucher
+          mkdir -p $D
+          cat > $D/PrintPlugin.java <<'EOF2'
+          package com.mehta.voucher;
+
+          import android.content.Context;
+          import android.print.PrintAttributes;
+          import android.print.PrintDocumentAdapter;
+          import android.print.PrintManager;
+          import android.webkit.WebView;
+          import com.getcapacitor.Plugin;
+          import com.getcapacitor.PluginCall;
+          import com.getcapacitor.PluginMethod;
+          import com.getcapacitor.annotation.CapacitorPlugin;
+
+          @CapacitorPlugin(name = "AppPrint")
+          public class PrintPlugin extends Plugin {
+              @PluginMethod
+              public void print(final PluginCall call) {
+                  getActivity().runOnUiThread(new Runnable() {
+                      @Override
+                      public void run() {
+                          try {
+                              WebView webView = getBridge().getWebView();
+                              PrintManager pm = (PrintManager) getActivity().getSystemService(Context.PRINT_SERVICE);
+                              PrintDocumentAdapter adapter = webView.createPrintDocumentAdapter("Mehta Voucher");
+                              PrintAttributes attrs = new PrintAttributes.Builder()
+                                  .setMediaSize(PrintAttributes.MediaSize.ISO_A4)
+                                  .setMinMargins(new PrintAttributes.Margins(236, 236, 236, 236))
+                                  .build();
+                              pm.print("Mehta Voucher", adapter, attrs);
+                              call.resolve();
+                          } catch (Exception e) {
+                              call.reject(String.valueOf(e.getMessage()));
+                          }
+                      }
+                  });
+              }
+          }
+          EOF2
+          cat > $D/MainActivity.java <<'EOF3'
+          package com.mehta.voucher;
+
+          import android.os.Bundle;
+          import com.getcapacitor.BridgeActivity;
+
+          public class MainActivity extends BridgeActivity {
+              @Override
+              public void onCreate(Bundle savedInstanceState) {
+                  registerPlugin(PrintPlugin.class);
+                  super.onCreate(savedInstanceState);
+              }
+          }
+          EOF3
           npx cap sync android
       - name: Build APK
         working-directory: android
